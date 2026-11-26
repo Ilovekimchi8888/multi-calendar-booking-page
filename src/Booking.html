@@ -1,0 +1,174 @@
+<!doctype html>
+<html>
+<head>
+<base target="_top">
+<meta charset="utf-8">
+<style>
+  :root { --bg: #f6f4f0; --card: #fff; --ink: #22201c; --muted: #77716a; --line: #e4dfd7; --accent: #2f5f8f; --danger: #b3412f; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  button, input, textarea { font: inherit; color: inherit; }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 28px 16px 48px; }
+  h1 { font-size: 24px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 22px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px; }
+  .weekBar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+  .weekBar b { font-size: 16px; }
+  .nav { border: 1px solid var(--line); background: var(--card); border-radius: 8px; padding: 6px 14px; cursor: pointer; }
+  .nav:disabled { opacity: .35; cursor: default; }
+  .days { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+  .day h3 { font-size: 13px; margin: 0 0 8px; text-align: center; color: var(--muted); font-weight: 600; }
+  .slot { display: block; width: 100%; margin-bottom: 6px; padding: 8px 0; border: 1px solid var(--accent); color: var(--accent);
+    background: #fff; border-radius: 8px; cursor: pointer; font-weight: 600; }
+  .slot:hover, .slot.on { background: var(--accent); color: #fff; }
+  .none { color: var(--muted); font-size: 13px; text-align: center; padding: 8px 0; }
+  .msg { color: var(--muted); text-align: center; padding: 30px 0; }
+  form { margin-top: 18px; }
+  .chosen { font-weight: 600; margin: 0 0 4px; }
+  .local { color: var(--muted); font-size: 13px; margin: 0 0 14px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
+  input[type=text], input[type=email], textarea { width: 100%; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+  textarea { min-height: 80px; resize: vertical; }
+  .hp { position: absolute; left: -5000px; }
+  .primary { margin-top: 14px; background: var(--accent); color: #fff; border: 0; border-radius: 8px; padding: 11px 20px; cursor: pointer; font-weight: 600; }
+  .primary:disabled { opacity: .6; cursor: default; }
+  .err { color: var(--danger); margin-top: 10px; min-height: 20px; }
+  .done { text-align: center; padding: 30px 10px; }
+  .done h2 { margin: 0 0 8px; }
+  .hidden { display: none !important; }
+  @media (max-width: 640px) {
+    .days { grid-template-columns: 1fr; }
+    .day { border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+    .day h3 { text-align: left; }
+    .daySlots { display: flex; flex-wrap: wrap; gap: 6px; }
+    .slot { width: auto; padding: 8px 14px; margin: 0; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1 id="title">Book a meeting</h1>
+  <p class="sub" id="sub">Loading…</p>
+
+  <div class="card" id="pickCard">
+    <div class="weekBar">
+      <button class="nav" id="prev">‹ Earlier</button>
+      <b id="weekLabel"></b>
+      <button class="nav" id="next">Later ›</button>
+    </div>
+    <div id="days"><div class="msg">Loading free times…</div></div>
+
+    <form id="form" class="hidden" novalidate>
+      <p class="chosen" id="chosen"></p>
+      <p class="local" id="local"></p>
+      <label for="name">Your name</label>
+      <input type="text" id="name" maxlength="100" autocomplete="name">
+      <label for="email">Your email</label>
+      <input type="email" id="email" maxlength="200" autocomplete="email">
+      <label for="note">What would you like to talk about? (optional)</label>
+      <textarea id="note" maxlength="1000"></textarea>
+      <input class="hp" type="text" id="website" tabindex="-1" autocomplete="off" aria-hidden="true">
+      <button class="primary" type="submit" id="send">Request this time</button>
+      <div class="err" id="err"></div>
+    </form>
+  </div>
+
+  <div class="card done hidden" id="doneCard">
+    <h2>Request sent</h2>
+    <p id="doneText"></p>
+    <p style="color:var(--muted)">You'll get an email confirming we received it, and a Google Calendar invitation once it's confirmed.</p>
+  </div>
+</div>
+
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  function call(fn) { var args = Array.prototype.slice.call(arguments, 1);
+    return new Promise(function (ok, bad) { var r = google.script.run.withSuccessHandler(ok).withFailureHandler(bad); r[fn].apply(r, args); }); }
+  function errText(e) { return ((e && e.message) || String(e)).replace(/^(Error|Exception):\s*/, ''); }
+
+  var week = null, chosen = null, autoSkips = 0;
+  var myTz = '';
+  try { myTz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) {}
+
+  function loadWeek(ymd, note) {
+    $('days').innerHTML = '<div class="msg">Loading free times…</div>';
+    $('form').classList.add('hidden'); chosen = null;
+    call('getWeek', ymd || null).then(function (w) {
+      week = w;
+      $('title').textContent = w.title;
+      document.title = w.title;
+      $('sub').textContent = w.minutes + '-minute meeting · times are ' + w.timezoneLabel + (myTz && myTz !== w.timezone ? ' (your own time is shown when you pick one)' : '');
+      $('weekLabel').textContent = w.weekLabel;
+      $('prev').disabled = !w.prev; $('next').disabled = !w.next;
+      var total = w.days.reduce(function (n, d) { return n + d.slots.length; }, 0);
+      // On first load, skip ahead past weeks with nothing free
+      if (!total && w.next && !ymd && autoSkips < 6) { autoSkips++; loadWeek(w.next); return; }
+      if (!total && w.next && ymd && autoSkips > 0 && autoSkips < 6) { autoSkips++; loadWeek(w.next); return; }
+      autoSkips = 99;
+      renderDays(note);
+    }).catch(function (e) {
+      $('days').innerHTML = '<div class="msg">Sorry, the free times could not be loaded. Please try again later.</div>';
+      $('sub').textContent = '';
+    });
+  }
+
+  function renderDays(note) {
+    var html = (note ? '<p class="err" style="text-align:center">' + esc(note) + '</p>' : '') + '<div class="days">';
+    week.days.forEach(function (d) {
+      html += '<div class="day"><h3>' + esc(d.label) + '</h3><div class="daySlots">';
+      if (!d.slots.length) html += '<div class="none">—</div>';
+      d.slots.forEach(function (s) {
+        html += '<button class="slot" data-start="' + s.start + '" data-day="' + esc(d.label) + '">' + esc(s.label) + '</button>';
+      });
+      html += '</div></div>';
+    });
+    $('days').innerHTML = html + '</div>';
+  }
+
+  $('days').addEventListener('click', function (e) {
+    var b = e.target.closest('.slot'); if (!b) return;
+    Array.prototype.forEach.call(document.querySelectorAll('.slot.on'), function (x) { x.classList.remove('on'); });
+    b.classList.add('on');
+    chosen = Number(b.getAttribute('data-start'));
+    $('chosen').textContent = b.getAttribute('data-day') + ', ' + b.textContent + ' (' + week.timezoneLabel + ')';
+    var local = '';
+    if (myTz && myTz !== week.timezone) {
+      try {
+        local = 'That is ' + new Date(chosen).toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) + ' in your time zone.';
+      } catch (er) {}
+    }
+    $('local').textContent = local;
+    $('err').textContent = '';
+    $('form').classList.remove('hidden');
+    $('name').focus();
+  });
+
+  $('prev').onclick = function () { if (week.prev) { autoSkips = 99; loadWeek(week.prev); } };
+  $('next').onclick = function () { if (week.next) { autoSkips = 99; loadWeek(week.next); } };
+
+  $('form').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var form = { start: chosen, name: $('name').value.trim(), email: $('email').value.trim(), note: $('note').value.trim(), website: $('website').value };
+    if (!form.name) { $('err').textContent = 'Please enter your name.'; return; }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email)) { $('err').textContent = 'Please enter a valid email address.'; return; }
+    $('send').disabled = true; $('send').textContent = 'Sending…'; $('err').textContent = '';
+    call('requestBooking', form).then(function (res) {
+      $('pickCard').classList.add('hidden');
+      $('doneText').textContent = res.when ? 'You asked for ' + res.when + '.' : 'Thank you.';
+      $('doneCard').classList.remove('hidden');
+    }).catch(function (er) {
+      $('send').disabled = false; $('send').textContent = 'Request this time';
+      var m = errText(er);
+      if (m.indexOf('SLOT_GONE') !== -1) loadWeek(week.days[0].ymd, 'Sorry, that time was just taken. Please pick another one.');
+      else $('err').textContent = m;
+    });
+  });
+
+  loadWeek(null);
+})();
+</script>
+</body>
+</html>
